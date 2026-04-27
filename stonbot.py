@@ -13,6 +13,7 @@ import aiohttp
 TOKEN = "8394512581:AAED1pOf6ZPPgXQ_pKUiq_oVY46eo1cVMgE"
 GROUP_ID = -1002216755275
 SOLD_KEYWORDS = ["ПРОДАНО", "SOLD", "НЕМАЄ", "ЗАБРАНО", "ПРОДАЛ"]
+ITEMS_PER_PAGE = 20  # По 20 товаров на страницу
 # =================================
 
 logging.basicConfig(level=logging.INFO)
@@ -73,9 +74,15 @@ async def start(message: types.Message):
     ])
     await message.answer("👕 Вітаю! Обери свій розмір:", reply_markup=keyboard)
 
-@dp.callback_query(lambda c: c.data.startswith("size_"))
+@dp.callback_query(lambda c: c.data.startswith(("size_", "page_")))
 async def show_products(callback: types.CallbackQuery):
-    size = callback.data.split("_")[1]
+    # Проверяем, что это за callback
+    if callback.data.startswith("size_"):
+        size = callback.data.split("_")[1]
+        page = 0
+    else:  # page_X_size_Y
+        _, page_str, size = callback.data.split("_")
+        page = int(page_str)
     
     cursor.execute("SELECT message_id, text FROM products WHERE sizes LIKE ?", (f'%{size}%',))
     all_products = cursor.fetchall()
@@ -95,19 +102,50 @@ async def show_products(callback: types.CallbackQuery):
         conn.commit()
         logger.info(f"🗑️ Видалено {len(sold_ids)} проданих товарів")
     
-    if not available_products:
+    total = len(available_products)
+    
+    if total == 0:
         await callback.message.answer(f"😕 Товарів з розміром {size} поки немає.")
         await callback.answer()
         return
     
+    # Вычисляем сколько страниц и текущую позицию
+    total_pages = (total + ITEMS_PER_PAGE - 1) // ITEMS_PER_PAGE
+    
+    if page < 0:
+        page = 0
+    if page >= total_pages:
+        page = total_pages - 1
+    
+    start_idx = page * ITEMS_PER_PAGE
+    end_idx = min(start_idx + ITEMS_PER_PAGE, total)
+    products_on_page = available_products[start_idx:end_idx]
+    
+    # Создаем клавиатуру
     keyboard = InlineKeyboardMarkup(inline_keyboard=[])
-    for msg_id, text in available_products[:10]:
+    
+    # Добавляем кнопки товаров
+    for msg_id, text in products_on_page:
         short_name = text[:40] if text else "Товар"
         keyboard.inline_keyboard.append([
             InlineKeyboardButton(text=f"📦 {short_name}", url=f"https://t.me/c/{str(GROUP_ID)[4:]}/{msg_id}")
         ])
     
-    await callback.message.answer(f"✅ Знайдено товарів з розміром {size}: {len(available_products)}", reply_markup=keyboard)
+    # Добавляем кнопки навигации (если нужно)
+    nav_buttons = []
+    if page > 0:
+        nav_buttons.append(InlineKeyboardButton(text="◀️ Назад", callback_data=f"page_{page-1}_{size}"))
+    if page < total_pages - 1:
+        nav_buttons.append(InlineKeyboardButton(text="Вперед ▶️", callback_data=f"page_{page+1}_{size}"))
+    
+    if nav_buttons:
+        keyboard.inline_keyboard.append(nav_buttons)
+    
+    await callback.message.answer(
+        f"✅ Розмір {size} — товари {start_idx+1}-{end_idx} з {total}\n"
+        f"📄 Сторінка {page+1} з {total_pages}",
+        reply_markup=keyboard
+    )
     await callback.answer()
 
 @dp.message()
@@ -170,8 +208,6 @@ async def catch_edited_post(message: types.Message):
         cursor.execute("DELETE FROM products WHERE message_id = ?", (message.message_id,))
         conn.commit()
         logger.info(f"🗑️ Товар {message.message_id} видалено (немає розмірів у тексті)")
-    
-    # Додатково: перевіряємо, чи є цей товар в базі для інших розмірів (не потрібно)
 
 # ========== HTTP СЕРВЕР І САМОПІНГ ==========
 async def health_check(request):
