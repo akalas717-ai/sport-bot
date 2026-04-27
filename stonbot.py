@@ -14,6 +14,7 @@ TOKEN = "8394512581:AAED1pOf6ZPPgXQ_pKUiq_oVY46eo1cVMgE"
 GROUP_ID = -1002216755275
 SOLD_KEYWORDS = ["ПРОДАНО", "SOLD", "НЕМАЄ", "ЗАБРАНО", "ПРОДАЛ"]
 ITEMS_PER_PAGE = 20  # По 20 товаров на страницу
+ADMIN_ID = 7066974597  # 🔴 ЗАМЕНИ НА СВОЙ TELEGRAM ID!
 # =================================
 
 logging.basicConfig(level=logging.INFO)
@@ -73,6 +74,79 @@ async def start(message: types.Message):
          InlineKeyboardButton(text="XXL", callback_data="size_XXL")]
     ])
     await message.answer("👕 Вітаю! Обери свій розмір:", reply_markup=keyboard)
+
+@dp.message(Command("scan"))
+async def scan_all(message: types.Message):
+    """Примусове сканування всіх постів у групі"""
+    # Проверяем, что команду дал админ
+    if message.from_user.id != ADMIN_ID:
+        await message.answer("⛔ Немає прав. Ця команда тільки для адміністратора.")
+        return
+    
+    await message.answer("🔄 Починаю сканування групи... Це може зайняти кілька хвилин.")
+    
+    offset = 0
+    count = 0
+    total_processed = 0
+    
+    while True:
+        try:
+            # Получаем историю сообщений из группы
+            history = await bot.get_chat_history(chat_id=GROUP_ID, limit=100, offset=offset)
+            if not history:
+                break
+            
+            for msg in history:
+                total_processed += 1
+                full_text = msg.text or msg.caption or ""
+                
+                # Пропускаем если продано
+                if is_sold(full_text):
+                    continue
+                
+                sizes = extract_sizes(full_text)
+                if sizes:
+                    # Сохраняем или обновляем товар
+                    cursor.execute("INSERT OR REPLACE INTO products (message_id, text, sizes) VALUES (?, ?, ?)",
+                                   (msg.message_id, full_text[:200], ",".join(sizes)))
+                    count += 1
+                    logger.info(f"✅ Збережено товар: {msg.message_id} | Розміри: {sizes}")
+            
+            conn.commit()
+            
+            # Если получили меньше 100 сообщений - это последняя страница
+            if len(history) < 100:
+                break
+            offset += 100
+            
+            # Небольшая задержка, чтобы не нагружать API Telegram
+            await asyncio.sleep(0.5)
+            
+        except Exception as e:
+            logger.error(f"Помилка сканування: {e}")
+            await message.answer(f"❌ Сталася помилка: {e}")
+            return
+    
+    await message.answer(f"✅ Сканування завершено!\n"
+                        f"📊 Оброблено повідомлень: {total_processed}\n"
+                        f"📦 Знайдено товарів: {count}\n\n"
+                        f"Тепер обери розмір кнопкою нижче.", 
+                        reply_markup=InlineKeyboardMarkup(inline_keyboard=[
+                            [InlineKeyboardButton(text="🔍 Подивитись товари", callback_data="show_sizes")]
+                        ]))
+
+@dp.callback_query(lambda c: c.data == "show_sizes")
+async def show_sizes_menu(callback: types.CallbackQuery):
+    """Показывает меню размеров после сканирования"""
+    keyboard = InlineKeyboardMarkup(inline_keyboard=[
+        [InlineKeyboardButton(text="S", callback_data="size_S"),
+         InlineKeyboardButton(text="M", callback_data="size_M"),
+         InlineKeyboardButton(text="L", callback_data="size_L")],
+        [InlineKeyboardButton(text="XL", callback_data="size_XL"),
+         InlineKeyboardButton(text="XXL", callback_data="size_XXL")]
+    ])
+    await callback.message.edit_text("👕 Обери свій розмір:", reply_markup=keyboard)
+    await callback.answer()
 
 @dp.callback_query(lambda c: c.data.startswith(("size_", "page_")))
 async def show_products(callback: types.CallbackQuery):
